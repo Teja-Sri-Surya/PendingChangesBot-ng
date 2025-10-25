@@ -420,3 +420,252 @@ def fetch_diff(request):
         return HttpResponse(html_content, content_type="text/html")
     except requests.RequestException as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+# LiftWing Model Visualization Views
+
+def liftwing_page(request: HttpRequest) -> HttpResponse:
+    """Render the LiftWing model visualization page."""
+    return render(request, "reviews/lift.html")
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def validate_article(request: HttpRequest) -> JsonResponse:
+    """Validate that an article exists on the specified wiki."""
+    try:
+        data = json.loads(request.body)
+        wiki_code = data.get("wiki", "en")
+        article_title = data.get("title", "")
+        
+        if not article_title:
+            return JsonResponse({"error": "Article title is required"}, status=400)
+        
+        # Use MediaWiki API to validate article existence
+        api_url = f"https://{wiki_code}.wikipedia.org/w/api.php"
+        params = {
+            "action": "query",
+            "format": "json",
+            "titles": article_title,
+            "prop": "info",
+            "inprop": "url"
+        }
+        
+        response = requests.get(api_url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        pages = data.get("query", {}).get("pages", {})
+        
+        # Check if article exists (not -1 means it exists)
+        for page_id, page_info in pages.items():
+            if page_id != "-1":  # Article exists
+                return JsonResponse({
+                    "exists": True,
+                    "title": page_info.get("title", article_title),
+                    "pageid": int(page_id),
+                    "url": page_info.get("fullurl", "")
+                })
+        
+        return JsonResponse({
+            "exists": False,
+            "title": article_title,
+            "error": "Article not found"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error validating article: {e}")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def fetch_revisions(request: HttpRequest) -> JsonResponse:
+    """Fetch revision history for an article."""
+    try:
+        data = json.loads(request.body)
+        wiki_code = data.get("wiki", "en")
+        article_title = data.get("title", "")
+        limit = data.get("limit", 50)
+        
+        if not article_title:
+            return JsonResponse({"error": "Article title is required"}, status=400)
+        
+        # Use MediaWiki API to fetch revision history
+        api_url = f"https://{wiki_code}.wikipedia.org/w/api.php"
+        params = {
+            "action": "query",
+            "format": "json",
+            "titles": article_title,
+            "prop": "revisions",
+            "rvprop": "ids|timestamp|user|comment|size|sha1",
+            "rvlimit": limit,
+            "rvdir": "newer"  # Get revisions from oldest to newest
+        }
+        
+        response = requests.get(api_url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        pages = data.get("query", {}).get("pages", {})
+        
+        revisions = []
+        for page_id, page_info in pages.items():
+            if page_id != "-1":
+                revs = page_info.get("revisions", [])
+                for rev in revs:
+                    revisions.append({
+                        "revid": rev.get("revid"),
+                        "timestamp": rev.get("timestamp"),
+                        "user": rev.get("user", "Anonymous"),
+                        "comment": rev.get("comment", ""),
+                        "size": rev.get("size", 0),
+                        "sha1": rev.get("sha1", "")
+                    })
+        
+        return JsonResponse({
+            "revisions": revisions,
+            "total": len(revisions)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching revisions: {e}")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def fetch_predictions(request: HttpRequest) -> JsonResponse:
+    """Fetch predictions for a single revision."""
+    try:
+        data = json.loads(request.body)
+        wiki_code = data.get("wiki", "en")
+        model = data.get("model", "articlequality")
+        rev_id = data.get("rev_id")
+        
+        if not rev_id:
+            return JsonResponse({"error": "Revision ID is required"}, status=400)
+        
+        # Use LiftWing API to get prediction
+        url = f"https://api.wikimedia.org/service/lw/inference/v1/models/{wiki_code}wiki-{model}/predict"
+        headers = {"User-Agent": "PendingChangesBot/1.0"}
+        payload = {"rev_id": rev_id}
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        result = response.json()
+        return JsonResponse({
+            "rev_id": rev_id,
+            "prediction": result.get("output", result)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching prediction: {e}")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def fetch_liftwing_predictions(request: HttpRequest) -> JsonResponse:
+    """Fetch predictions for multiple revisions using parallel requests."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    try:
+        data = json.loads(request.body)
+        wiki_code = data.get("wiki", "en")
+        model = data.get("model", "articlequality")
+        revisions = data.get("revisions", [])
+        
+        if not revisions:
+            return JsonResponse({"error": "Revisions list is required"}, status=400)
+        
+        # Base URL for LiftWing API
+        base_url = f"https://api.wikimedia.org/service/lw/inference/v1/models/{wiki_code}wiki-{model}/predict"
+        headers = {"User-Agent": "PendingChangesBot/1.0"}
+        
+        def fetch_single_prediction(rev_id):
+            """Fetch prediction for a single revision ID"""
+            try:
+                payload = {"rev_id": rev_id}
+                response = requests.post(base_url, json=payload, headers=headers, timeout=15)
+                response.raise_for_status()
+                result = response.json()
+                return (rev_id, result.get("output", result))
+            except requests.exceptions.Timeout:
+                return (rev_id, {"error": "Request timed out"})
+            except requests.exceptions.HTTPError as e:
+                return (rev_id, {"error": f"HTTP {e.response.status_code}: {str(e)}"})
+            except Exception as e:
+                return (rev_id, {"error": str(e)})
+        
+        predictions = {}
+        
+        # Use ThreadPoolExecutor for parallel requests (max 10 concurrent)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            # Submit all tasks
+            future_to_rev = {executor.submit(fetch_single_prediction, rev_id): rev_id 
+                            for rev_id in revisions}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_rev):
+                rev_id, prediction = future.result()
+                predictions[rev_id] = prediction
+        
+        return JsonResponse({"predictions": predictions})
+        
+    except Exception as e:
+        logger.error(f"Error fetching LiftWing predictions: {e}")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@require_GET
+def liftwing_models(request: HttpRequest, wiki_code: str) -> JsonResponse:
+    """Return available LiftWing models for the given wiki."""
+    # Comprehensive list of available Wikimedia ML models
+    models = [
+        {
+            "name": "articlequality",
+            "version": "1.0.0",
+            "description": "Predicts the quality class of Wikipedia articles",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        },
+        {
+            "name": "draftquality",
+            "version": "1.0.0",
+            "description": "Predicts the quality of new article drafts",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        },
+        {
+            "name": "revertrisk",
+            "version": "1.0.0",
+            "description": "Predicts the likelihood of an edit being reverted",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        },
+        {
+            "name": "revertrisk-multilingual",
+            "version": "1.0.0",
+            "description": "Multilingual revert risk prediction",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        },
+        {
+            "name": "damaging",
+            "version": "1.0.0",
+            "description": "Predicts if an edit is damaging",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        },
+        {
+            "name": "goodfaith",
+            "version": "1.0.0",
+            "description": "Predicts if an edit is made in good faith",
+            "supported_languages": ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "zh", "ar", "hi", "tr", "pl", "nl", "sv", "no", "da", "fi", "cs", "hu", "ro", "bg", "hr", "sk", "sl", "et", "lv", "lt", "el", "he", "th", "vi", "ko", "uk", "be", "mk", "sq", "sr", "bs", "hr", "sl", "sk", "cs", "pl", "hu", "ro", "bg", "el", "tr", "ar", "he", "fa", "ur", "hi", "bn", "ta", "te", "ml", "kn", "gu", "pa", "or", "as", "ne", "si", "my", "km", "lo", "th", "vi", "ko", "ja", "zh", "yue", "zh-min-nan", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical", "zh-yue", "yue", "nan", "hak", "gan", "wuu", "cdo", "mnp", "cjy", "hsn", "lzh", "zh-classical"]
+        }
+    ]
+    
+    # Filter models that support the given wiki language
+    supported_models = [
+        model for model in models 
+        if wiki_code in model["supported_languages"]
+    ]
+    
+    return JsonResponse({"models": supported_models})

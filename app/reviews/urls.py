@@ -20,4 +20,11 @@ urlpatterns = [
     path("api/wikis/<int:pk>/clear/", views.api_clear_cache, name="api_clear_cache"),
     path("api/wikis/<int:pk>/configuration/", views.api_configuration, name="api_configuration"),
     path("api/wikis/fetch-diff/", views.fetch_diff, name="fetch_diff"),
+    # LiftWing Model Visualization endpoints
+    path("liftwing/", views.liftwing_page, name="liftwing"),
+    path("validate_article/", views.validate_article, name="validate_article"),
+    path("fetch_revisions/", views.fetch_revisions, name="fetch_revisions"),
+    path("fetch_predictions/", views.fetch_predictions, name="fetch_predictions"),
+    path("fetch_liftwing_predictions/", views.fetch_liftwing_predictions, name="fetch_liftwing_predictions"),
+    path("api/liftwing_models/<str:wiki_code>/", views.liftwing_models, name="liftwing_models"),
 ]

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiftWing Model Visualization - PendingChangesBot</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin: 20px 0;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+        .error {
+            color: #ff3860;
+            background-color: #ffebee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #00d1b2;
+            background-color: #e8f5e8;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .revision-table {
+            margin-top: 20px;
+        }
+        .revision-row {
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .revision-row:hover {
+            background-color: #f5f5f5;
+        }
+        .selected-revision {
+            background-color: #e3f2fd !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container is-fluid">
+        <div class="section">
+            <h1 class="title is-1">LiftWing Model Visualization</h1>
+            <p class="subtitle">Visualize how LiftWing machine learning models evaluate Wikipedia articles over their revision history</p>
+            
+            <!-- Wiki and Article Selection -->
+            <div class="box">
+                <h2 class="title is-4">Article Selection</h2>
+                <div class="field is-grouped">
+                    <div class="control">
+                        <label class="label">Wiki:</label>
+                        <div class="select">
+                            <select id="wiki">
+                                <option value="en">English Wikipedia</option>
+                                <option value="de">German Wikipedia</option>
+                                <option value="fr">French Wikipedia</option>
+                                <option value="es">Spanish Wikipedia</option>
+                                <option value="it">Italian Wikipedia</option>
+                                <option value="pt">Portuguese Wikipedia</option>
+                                <option value="ru">Russian Wikipedia</option>
+                                <option value="ja">Japanese Wikipedia</option>
+                                <option value="zh">Chinese Wikipedia</option>
+                                <option value="ar">Arabic Wikipedia</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="control">
+                        <label class="label">Article Title:</label>
+                        <input class="input" type="text" id="articleTitle" placeholder="Enter article title (e.g., Python (programming language))">
+                    </div>
+                    <div class="control">
+                        <label class="label">Model:</label>
+                        <div class="select">
+                            <select id="model">
+                                <option value="articlequality">Article Quality</option>
+                                <option value="draftquality">Draft Quality</option>
+                                <option value="revertrisk">Revert Risk</option>
+                                <option value="revertrisk-multilingual">Revert Risk (Multilingual)</option>
+                                <option value="damaging">Damaging</option>
+                                <option value="goodfaith">Good Faith</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="control">
+                        <label class="label">&nbsp;</label>
+                        <button class="button is-primary" id="analyzeBtn">Analyze Article</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Messages -->
+            <div id="statusMessages"></div>
+
+            <!-- Loading Indicator -->
+            <div id="loadingIndicator" class="loading" style="display: none;">
+                <div class="progress is-small">
+                    <div class="progress-bar" role="progressbar" style="width: 0%"></div>
+                </div>
+                <p>Loading...</p>
+            </div>
+
+            <!-- Results Section -->
+            <div id="resultsSection" style="display: none;">
+                <!-- Chart -->
+                <div class="box">
+                    <h2 class="title is-4">Model Scores Over Time</h2>
+                    <div class="chart-container">
+                        <canvas id="scoreChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Revision History Table -->
+                <div class="box">
+                    <h2 class="title is-4">Revision History</h2>
+                    <div class="table-container">
+                        <table class="table is-fullwidth is-striped">
+                            <thead>
+                                <tr>
+                                    <th>Revision ID</th>
+                                    <th>Timestamp</th>
+                                    <th>User</th>
+                                    <th>Comment</th>
+                                    <th>Size</th>
+                                    <th>Model Score</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="revisionTableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart = null;
+        let currentData = null;
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', function() {
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            analyzeBtn.addEventListener('click', analyzeArticle);
+        });
+
+        async function analyzeArticle() {
+            const wiki = document.getElementById('wiki').value;
+            const articleTitle = document.getElementById('articleTitle').value.trim();
+            const model = document.getElementById('model').value;
+
+            if (!articleTitle) {
+                showError('Please enter an article title');
+                return;
+            }
+
+            showLoading('Validating article...');
+            clearMessages();
+
+            try {
+                // Step 1: Validate article
+                const validationResult = await validateArticle(wiki, articleTitle);
+                if (!validationResult.exists) {
+                    showError(`Article "${articleTitle}" not found on ${wiki}.wikipedia.org`);
+                    hideLoading();
+                    return;
+                }
+
+                showSuccess(`Article "${validationResult.title}" found! Fetching revision history...`);
+
+                // Step 2: Fetch revision history
+                showLoading('Fetching revision history...');
+                const revisions = await fetchRevisions(wiki, articleTitle);
+                
+                if (revisions.length === 0) {
+                    showError('No revisions found for this article');
+                    hideLoading();
+                    return;
+                }
+
+                showSuccess(`Found ${revisions.length} revisions. Fetching model predictions...`);
+
+                // Step 3: Fetch model predictions
+                showLoading('Fetching model predictions...');
+                const predictions = await fetchPredictions(wiki, model, revisions);
+
+                // Step 4: Display results
+                displayResults(revisions, predictions, model);
+                hideLoading();
+
+            } catch (error) {
+                console.error('Error analyzing article:', error);
+                showError(`Error: ${error.message}`);
+                hideLoading();
+            }
+        }
+
+        async function validateArticle(wiki, title) {
+            const response = await fetch('/validate_article/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ wiki, title })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            return await response.json();
+        }
+
+        async function fetchRevisions(wiki, title) {
+            const response = await fetch('/fetch_revisions/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ wiki, title, limit: 50 })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            return data.revisions || [];
+        }
+
+        async function fetchPredictions(wiki, model, revisions) {
+            const revIds = revisions.map(rev => rev.revid);
+            
+            const response = await fetch('/fetch_liftwing_predictions/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ wiki, model, revisions: revIds })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            return data.predictions || {};
+        }
+
+        function displayResults(revisions, predictions, model) {
+            currentData = { revisions, predictions, model };
+            
+            // Create chart
+            createChart(revisions, predictions, model);
+            
+            // Create revision table
+            createRevisionTable(revisions, predictions);
+            
+            // Show results section
+            document.getElementById('resultsSection').style.display = 'block';
+        }
+
+        function createChart(revisions, predictions, model) {
+            const ctx = document.getElementById('scoreChart').getContext('2d');
+            
+            // Destroy existing chart
+            if (chart) {
+                chart.destroy();
+            }
+
+            const labels = revisions.map((rev, index) => `Rev ${index + 1}`);
+            const scores = revisions.map(rev => {
+                const prediction = predictions[rev.revid];
+                if (prediction && prediction.score !== undefined) {
+                    return prediction.score;
+                }
+                return null;
+            });
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: `${model} Score`,
+                        data: scores,
+                        borderColor: 'rgb(75, 192, 192)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                        tension: 0.1,
+                        pointRadius: 4,
+                        pointHoverRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 1
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const revIndex = context.dataIndex;
+                                    const rev = revisions[revIndex];
+                                    return [
+                                        `Revision: ${rev.revid}`,
+                                        `User: ${rev.user}`,
+                                        `Score: ${context.parsed.y}`
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function createRevisionTable(revisions, predictions) {
+            const tbody = document.getElementById('revisionTableBody');
+            tbody.innerHTML = '';
+
+            revisions.forEach((rev, index) => {
+                const prediction = predictions[rev.revid];
+                const score = prediction && prediction.score !== undefined ? prediction.score.toFixed(3) : 'N/A';
+                
+                const row = document.createElement('tr');
+                row.className = 'revision-row';
+                row.dataset.revIndex = index;
+                
+                row.innerHTML = `
+                    <td>${rev.revid}</td>
+                    <td>${new Date(rev.timestamp).toLocaleString()}</td>
+                    <td>${rev.user}</td>
+                    <td>${rev.comment || ''}</td>
+                    <td>${rev.size.toLocaleString()}</td>
+                    <td>${score}</td>
+                    <td>
+                        <a href="https://${document.getElementById('wiki').value}.wikipedia.org/w/index.php?diff=${rev.revid}" 
+                           target="_blank" class="button is-small is-info">View Diff</a>
+                    </td>
+                `;
+
+                // Add click handler for row selection
+                row.addEventListener('click', function() {
+                    // Remove previous selection
+                    document.querySelectorAll('.revision-row').forEach(r => r.classList.remove('selected-revision'));
+                    // Add selection to current row
+                    this.classList.add('selected-revision');
+                    
+                    // Highlight corresponding point in chart
+                    if (chart) {
+                        chart.setActiveElements([{
+                            datasetIndex: 0,
+                            index: index
+                        }]);
+                        chart.update();
+                    }
+                });
+
+                tbody.appendChild(row);
+            });
+        }
+
+        function showLoading(message) {
+            const indicator = document.getElementById('loadingIndicator');
+            indicator.querySelector('p').textContent = message;
+            indicator.style.display = 'block';
+        }
+
+        function hideLoading() {
+            document.getElementById('loadingIndicator').style.display = 'none';
+        }
+
+        function showError(message) {
+            const messagesDiv = document.getElementById('statusMessages');
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error';
+            errorDiv.textContent = message;
+            messagesDiv.appendChild(errorDiv);
+        }
+
+        function showSuccess(message) {
+            const messagesDiv = document.getElementById('statusMessages');
+            const successDiv = document.createElement('div');
+            successDiv.className = 'success';
+            successDiv.textContent = message;
+            messagesDiv.appendChild(successDiv);
+        }
+
+        function clearMessages() {
+            document.getElementById('statusMessages').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
