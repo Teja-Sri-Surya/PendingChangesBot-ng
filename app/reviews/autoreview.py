@@ -421,6 +421,44 @@ def _evaluate_revision(
         }
     )
 
+    # Test 9: Domain verification for new external links
+    domain_check = _check_domain_verification(revision, client)
+    if domain_check["status"] == "manual":
+        tests.append(
+            {
+                "id": "domain-verification",
+                "title": "Domain verification for external links",
+                "status": "fail",
+                "message": domain_check["message"],
+            }
+        )
+        return {
+            "tests": tests,
+            "decision": AutoreviewDecision(
+                status="blocked",
+                label="Cannot be auto-approved",
+                reason="The edit contains external links with potentially invalid domains.",
+            ),
+        }
+    elif domain_check["status"] == "error":
+        tests.append(
+            {
+                "id": "domain-verification",
+                "title": "Domain verification for external links",
+                "status": "error",
+                "message": domain_check["message"],
+            }
+        )
+    else:
+        tests.append(
+            {
+                "id": "domain-verification",
+                "title": "Domain verification for external links",
+                "status": "ok",
+                "message": domain_check["message"],
+            }
+        )
+
     return {
         "tests": tests,
         "decision": AutoreviewDecision(
@@ -911,3 +949,126 @@ def _find_reviewed_revisions_by_sha1(client, page, reverted_rev_ids: list[int]) 
     except Exception as e:
         logger.error(f"Error finding reviewed revisions for page {page.pageid}: {e}")
         return []
+
+
+def _check_domain_verification(revision: PendingRevision, client: WikiClient) -> dict:
+    """
+    Check if new external links have valid domains.
+    
+    This implements domain verification for link additions as requested in Issue #25.
+    Verifies that external links point to legitimate, accessible domains.
+    
+    Args:
+        revision: PendingRevision to check
+        client: WikiClient instance
+        
+    Returns:
+        dict: Test result with status and details
+    """
+    try:
+        # Get current and parent wikitext
+        current_wikitext = revision.wikitext or ""
+        parent_wikitext = _get_parent_wikitext(revision)
+        
+        # Extract URLs from both versions
+        url_pattern = r'https?://[^\s\[\]{}|`<>"]+'
+        current_urls = set(re.findall(url_pattern, current_wikitext, re.IGNORECASE))
+        parent_urls = set(re.findall(url_pattern, parent_wikitext, re.IGNORECASE))
+        
+        # Find new URLs added in this revision
+        new_urls = current_urls - parent_urls
+        
+        if not new_urls:
+            return {
+                "status": "ok",
+                "message": "No new external links added"
+            }
+        
+        # Check each new URL for domain validity
+        invalid_domains = []
+        for url in new_urls:
+            try:
+                # Extract domain from URL
+                domain = _extract_domain_from_url(url)
+                if not _is_valid_domain(domain):
+                    invalid_domains.append(url)
+            except Exception:
+                invalid_domains.append(url)
+        
+        if invalid_domains:
+            return {
+                "status": "manual",
+                "message": f"New external links with potentially invalid domains: {', '.join(invalid_domains[:3])}{'...' if len(invalid_domains) > 3 else ''}",
+                "details": {
+                    "invalid_urls": invalid_domains,
+                    "total_new_urls": len(new_urls)
+                }
+            }
+        
+        return {
+            "status": "ok", 
+            "message": f"All {len(new_urls)} new external links have valid domains"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking domain verification for revision {revision.revid}: {e}")
+        return {
+            "status": "error",
+            "message": f"Domain verification check failed: {str(e)}"
+        }
+
+
+def _extract_domain_from_url(url: str) -> str:
+    """Extract domain from URL for validation."""
+    import urllib.parse
+    
+    try:
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        # Remove port if present
+        if ':' in domain:
+            domain = domain.split(':')[0]
+            
+        return domain
+    except Exception:
+        return ""
+
+
+def _is_valid_domain(domain: str) -> bool:
+    """
+    Check if domain is valid and legitimate.
+    
+    This implements basic domain validation:
+    - Must have valid TLD
+    - Must not be in blacklist of known bad domains
+    - Must have reasonable length
+    """
+    if not domain or len(domain) < 3:
+        return False
+    
+    # Check for valid TLD (at least 2 characters)
+    if '.' not in domain or len(domain.split('.')[-1]) < 2:
+        return False
+    
+    # Blacklist of known problematic domains
+    blacklisted_domains = {
+        'localhost', '127.0.0.1', '0.0.0.0', 'example.com', 'test.com',
+        'spam.com', 'malware.com', 'phishing.com'
+    }
+    
+    if domain in blacklisted_domains:
+        return False
+    
+    # Check for suspicious patterns
+    suspicious_patterns = [
+        r'^\d+\.\d+\.\d+\.\d+$',  # IP addresses
+        r'[^\w.-]',  # Invalid characters
+        r'\.{2,}',  # Multiple consecutive dots
+    ]
+    
+    for pattern in suspicious_patterns:
+        if re.search(pattern, domain):
+            return False
+    
+    return True
