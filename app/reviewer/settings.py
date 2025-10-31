@@ -131,6 +131,9 @@ ORES_GOODFAITH_THRESHOLD = float(os.getenv("ORES_GOODFAITH_THRESHOLD", "0.7"))
 ORES_DAMAGING_THRESHOLD_LIVING = float(os.getenv("ORES_DAMAGING_THRESHOLD_LIVING", "0.1"))
 ORES_GOODFAITH_THRESHOLD_LIVING = float(os.getenv("ORES_GOODFAITH_THRESHOLD", "0.9"))
 
+# Pending changes dry-run mode (default: True for safety)
+PENDING_CHANGES_DRY_RUN = os.getenv("PENDING_CHANGES_DRY_RUN", "True").lower() in ("true", "1", "yes")
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
